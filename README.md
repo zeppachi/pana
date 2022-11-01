@@ -1,5 +1,6 @@
 # pana
-Anonymization of Linux communications
+Anonymization of Linux communications.  
+Tor Transparent Proxy & DNS over Tor & Kill Switch
 
 ## Install/Update
 ```bash
