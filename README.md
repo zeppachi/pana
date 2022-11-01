@@ -14,7 +14,7 @@ Anonymization of Linux communications
 ```
 or
 ```bash
-# systemctl restart pana.service
+# systemctl restart pana
 ```
 ## How to Enable/Disable
 ```bash
