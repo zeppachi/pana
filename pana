@@ -1,0 +1,794 @@
+#!/usr/bin/env python3
+# -*- coding : UTF-8 -*-
+
+# Pana 0.1.0
+# Copyright 2022 ZEPPACHI
+# Released under the MIT license
+
+STD_LISTEN_IP = '127.0.0.1'
+STD_DNS_PORT = 8053
+STD_OPEN_PORT = [] # Recommend not to use
+
+DNS_SERVER = ['dns4torpnlfs2ifuz2s2yf3fc7rdmsbhm6rw75euj35pac6ap25zgqad.onion'] # Cloudflare(1.1.1.1)
+#DNS_SERVER = ['1.1.1.1'] # Test
+DNS_STATIC_IP = {'*.test':'127.0.0.1', 'aaa.bbb.ccc':'123.123.123.123'}
+DNS_CACHE_TIME = 60 * 3 # sec
+DNS_CACHE_NUM = 1000 # requests
+
+TOR_IP = '127.0.0.1'
+TOR_SOCKS_PORT = 9050
+TOR_TRANS_PORT = 9040
+TOR_DNS_PORT = 9053
+TOR_EXCLUDE_NODES = r'{jp},{us},{gb},{ca},{au},{nz},{dk},{fr},{nl},{no},{de},{be},{it},{es},{il},{sg},{kr},{se},{??},SlowServer'
+
+
+# ************************
+# Do not edit below this!
+# ************************
+
+TOR_CONF = """
+# Create by Pana
+MaxCircuitDirtiness 300
+NewCircuitPeriod 60
+ExcludeNodes {ExcludeNodes}
+StrictNodes 0
+VirtualAddrNetworkIPv4 10.192.0.0/10
+AutomapHostsSuffixes .onion,.exit
+AutomapHostsOnResolve 1
+SocksPort 0.0.0.0:{SocksPort} IsolateDestAddr
+TransPort 0.0.0.0:{TransPort} IsolateDestAddr
+DirPort 0
+ORPort 0
+DnsPort 0.0.0.0:{DnsPort}
+UseEntryGuards 0
+NumEntryGuards 0
+ConnectionPadding 1
+ReducedCircuitPadding 1
+ReducedConnectionPadding 1
+ClientOnly 1
+ExitRelay 0
+ExitPolicy reject : *:*
+""".lstrip().format(ExcludeNodes=TOR_EXCLUDE_NODES, SocksPort=str(TOR_SOCKS_PORT), TransPort=str(TOR_TRANS_PORT), DnsPort=str(TOR_DNS_PORT))
+
+UNIT_FILE_BLOCK = """
+[Unit]
+Description=Tor Only Link Pre
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/pana block
+
+[Install]
+WantedBy=multi-user.target
+""".lstrip()
+
+UNIT_FILE_MAIN = """
+[Unit]
+Description=Tor Only Link Main
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/pana run
+ExecStop=/usr/bin/pana stop
+ExecReload=/usr/bin/pana reload
+
+[Install]
+WantedBy=multi-user.target
+""".lstrip()
+
+
+import sys
+import os
+import time
+import subprocess
+import threading
+import socket
+import re
+import logging
+
+#logging.disable(logging.CRITICAL)
+dns_cache = {}
+
+
+def resolve_socks(query):
+	for dns in DNS_SERVER:
+		dns = dns.split(':', 2)
+		if len(dns) == 1:
+			port = (53).to_bytes(2, byteorder='big')
+			dns = dns[0]
+		else:
+			port = int(dns[1]).to_bytes(2, byteorder='big')
+			dns = dns[0]
+
+		if re.match("^[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}$", dns):
+			# IP
+			ip = dns.split('.')
+			req = b"\x05\x01\x00\x01"
+			req += int(ip[0]).to_bytes(1, byteorder='big')
+			req += int(ip[1]).to_bytes(1, byteorder='big')
+			req += int(ip[2]).to_bytes(1, byteorder='big')
+			req += int(ip[3]).to_bytes(1, byteorder='big')
+			req += port
+
+		else:
+			# DOMAIN
+			req = b"\x05\x01\x00\x03"
+			req += len(dns).to_bytes(1, byteorder='big')
+			req += dns.encode()
+			req += port
+
+		try:
+			sv_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+			sv_sock.connect((TOR_IP, TOR_SOCKS_PORT))
+
+		except:
+			logging.info('SOCKS5 connection error')
+			return b''
+
+		try:
+			# SOCKS5 Handshake
+			sv_sock.sendall(b"\x05\x01\x00")
+			sv_sock.settimeout(5)
+			res = sv_sock.recv(512)
+
+			if res != b"\x05\x00":
+				logging.info('SOCKS5 1st handshake faild')
+				sv_sock.close()
+				continue
+
+			sv_sock.sendall(req)
+			sv_sock.settimeout(5)
+			res = sv_sock.recv(512)
+
+			if res[0] != 5 or res[1] != 0:
+				logging.info('SOCKS5 2nd handshake faild')
+				sv_sock.close()
+				continue
+
+		except:
+			logging.info('SOCKS5 network error')
+			sv_sock.close()
+			continue
+
+		try:
+			# SOCKS5 Req/Res
+			sv_sock.sendall(query)
+			sv_sock.settimeout(10)
+			res = sv_sock.recv(4096)
+
+			sv_sock.close()
+
+		except:
+			logging.info('SOCKS5 communications error')
+			sv_sock.close()
+			continue
+
+		return res
+
+	return b''
+
+
+def resolve_tor(query):
+	try:
+		sv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+	except:
+		logging.info('Tor connection error')
+		return b''
+
+	try:
+		sv_sock.sendto(query[2:], (TOR_IP, TOR_DNS_PORT))
+		sv_sock.settimeout(5)
+		res, addr = sv_sock.recvfrom(512)
+
+	except:
+		logging.info('Tor communications error')
+		return b''
+
+	sv_sock.close()
+
+	return len(res).to_bytes(2, byteorder='big') + res
+
+
+def resolve_static(query, dip):
+	# query to answer
+	res = query[2:]
+	res = res[0:2] + b'\x81\x80' + res[4:]
+	res = res[0:6] + b'\x00\x01\x00\x00\x00\x00' + res[12:] # add ANCOUNT, NSCOUNT and ARCOUNT
+
+	# trim
+	pos = 12
+	for i in range(10):
+		dlen = res[pos]
+		if (dlen == 0):
+			break
+
+		pos += dlen + 1
+
+	res = res[0:pos+5]
+	dtype = res[-3]
+
+	# add answer
+	res += b'\xc0\x0c' # domain
+	res += dtype.to_bytes(2, byteorder='big') + b'\x00\x01' # type, class
+	res += b'\x00\x00\x00\xff' # TTL
+
+	if dtype == 2:
+		# NS
+		res += b'\x00\x02' # len
+		res += b'\xc0\x0c' # domain
+
+	elif dtype == 15:
+		# MX
+		res += b'\x00\x04' # len
+		res += b'\x00\x0a' # weight
+		res += b'\xc0\x0c' # domain
+
+	elif dtype == 1:
+		# A
+		res += b'\x00\x04' # len
+		# IP
+		dip = dip.split('.')
+		res += int(dip[0]).to_bytes(1, byteorder='big')
+		res += int(dip[1]).to_bytes(1, byteorder='big')
+		res += int(dip[2]).to_bytes(1, byteorder='big')
+		res += int(dip[3]).to_bytes(1, byteorder='big')
+
+	else:
+		return b''
+
+	res = len(res).to_bytes(2, byteorder='big') + res
+
+	return res
+
+
+def resolve(lock, query):
+	global dns_name_cache
+
+	domain = b''
+	pos = 14
+
+	try:
+		for i in range(10):
+			dlen = query[pos]
+			if (dlen == 0):
+				break
+
+			pos += 1
+			domain += query[pos:pos+dlen] + b'.'
+			pos += dlen
+
+		domain = domain[0:-1].decode()
+		dtype = query[pos + 2]
+
+	except:
+		return b''
+
+	logging.debug('domain: ' + domain)
+
+	if not re.match('^[-_\\.0-9a-zA-Z]{1,125}$', domain):
+		return b''
+
+	if dtype == 1 or dtype == 2 or dtype == 15:
+		for key in DNS_STATIC_IP.keys():
+			if re.match('^' + key.replace('.', '\\.').replace('*', '.*') + '$', domain):
+				return resolve_static(query, DNS_STATIC_IP[key])
+
+	if domain[-6:] == '.onion':
+		return resolve_tor(query)
+
+	ntime = time.time()
+	cache_name = domain + ':' + str(dtype)
+
+	lock.acquire()
+
+	if len(dns_cache) > DNS_CACHE_NUM:
+		for key in list(dns_cache):
+			if dns_cache[key][0] < ntime:
+				del dns_cache[key]
+
+	if cache_name in dns_cache.keys():
+		cache = dns_cache[cache_name]
+		if cache[0] < ntime:
+			cache = b''
+			del dns_cache[cache_name]
+
+		else:
+			cache = cache[1][0:2] + query[2:4] + cache[1][4:]
+
+	else:
+		cache = b''
+
+	lock.release()
+
+	if len(cache) > 0:
+		 return cache
+
+	else:
+		res = resolve_socks(query)
+
+		if len(res) > 0:
+			lock.acquire()
+			dns_cache[cache_name] = [ntime + DNS_CACHE_TIME, res]
+			lock.release()
+
+		return res
+
+
+def udp_worker(sock, addr, lock, query):
+	logging.info('protocol: udp')
+
+	query = len(query).to_bytes(2, byteorder='big') + query
+
+	res = resolve(lock, query) # Includes TCP header
+	res = res[2:]
+
+	if len(res) > 514:
+		# TCP fallback
+		fbres = query[2:]
+		fbres = fbres[0:2] + (fbres[2] | 0x82).to_bytes(1, byteorder='big') + fbres[3:] # QR:10000000 | TC:00000010 = 130
+		fbres = fbres[0:6] + res[6:12] + fbres[12:] # add ANCOUNT, NSCOUNT and ARCOUNT
+		sock.sendto(fbres, addr)
+		logging.info('\033[32mFALLBACK\033[0m')
+
+	elif len(res) >= 12:
+		sock.sendto(res, addr)
+		logging.info('\033[32mOK\033[0m')
+
+	else:
+		logging.info('\033[31mERR\033[0m')
+
+
+# Local DNS (UDP)
+def udp_server(ip, port, lock):
+	try:
+		udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+		udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+		udp_sock.bind((ip, port))
+
+	except Exception:
+		udp_sock.close()
+		logging.info('UDP/' + str(port) + ' start faild')
+		exit()
+
+	try:
+		while True:
+			query, addr = udp_sock.recvfrom(512)
+			t = threading.Thread(target=udp_worker, args=(udp_sock, addr, lock, query))
+			t.start()
+
+	except KeyboardInterrupt:
+		udp_sock.close()
+		exit()
+
+	except Exception:
+		udp_sock.close()
+		exit()
+
+
+def tcp_worker(sock, addr, lock):
+	logging.info('protocol: tcp')
+
+	try:
+		sock.settimeout(5)
+		query = sock.recv(4096)
+
+	except:
+		return b''
+
+	res = resolve(lock, query)
+
+	if len(res) > 0:
+		sock.sendall(res)
+		logging.info('\033[32mOK\033[0m')
+
+	else:
+		logging.info('\033[31mERR\033[0m')
+
+	sock.close()
+
+
+# Local DNS (TCP)
+def tcp_server(ip, port, lock):
+	try:
+		tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+		tcp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+		tcp_sock.bind((ip, port))
+		tcp_sock.setblocking(True)
+		tcp_sock.listen(20)
+
+	except Exception:
+		tcp_sock.close()
+		logging.info('TCP/' + str(port) + ' start faild')
+		exit()
+
+	try:
+		while True:
+			client, addr = tcp_sock.accept()
+			t = threading.Thread(target=tcp_worker, args=(client, addr, lock))
+			t.start()
+
+	except KeyboardInterrupt:
+		tcp_sock.close()
+		exit()
+
+	except Exception:
+		tcp_sock.close()
+		exit()
+
+
+def test_tor_socks():
+	try:
+		sv_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+		sv_sock.connect((TOR_IP, TOR_SOCKS_PORT))
+
+	except:
+		return False
+
+	try:
+		sv_sock.sendall(b"\x05\x01\x00")
+		sv_sock.settimeout(5)
+		res = sv_sock.recv(512)
+
+		if res != b"\x05\x00":
+			sv_sock.close()
+			return False
+
+	except:
+		return False
+
+	sv_sock.close()
+
+	return True
+
+
+def test_tor_dns():
+	try:
+		sv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+	except:
+		return False
+
+	query = '\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00'
+	query += '\x38' + 'dns4torpnlfs2ifuz2s2yf3fc7rdmsbhm6rw75euj35pac6ap25zgqad' + '\x05' + 'onion' + '\x00\x00\x01\x00\x01'
+	query = query.encode()
+
+	try:
+		sv_sock.sendto(query, (TOR_IP, TOR_DNS_PORT))
+		sv_sock.settimeout(5)
+		res, addr = sv_sock.recvfrom(512)
+
+	except:
+		sv_sock.close()
+		return False
+
+	if res[0:3] != b'\x12\x34\x81':
+		sv_sock.close()
+		return False
+
+	sv_sock.close()
+
+	return True
+
+
+# Start Kill Switch
+def start_fw():
+	# DNS Redirect
+	subprocess.call('iptables -t nat -N PANA', shell=True)
+	subprocess.call('iptables -t nat -A PANA -p tcp --dport 53 -j DNAT --to-destination 127.0.0.1:' + str(STD_DNS_PORT), shell=True)
+	subprocess.call('iptables -t nat -A PANA -p udp --dport 53 -j DNAT --to-destination 127.0.0.1:' + str(STD_DNS_PORT), shell=True)
+	subprocess.call('iptables -t nat -I OUTPUT -j PANA', shell=True)
+
+	# Allow local and reserved
+	for dip in ['0.0.0.0/8', '100.64.0.0/10', '169.254.0.0/16', '192.0.0.0/24', '192.0.2.0/24', '192.88.99.0/24',
+		'198.18.0.0/15', '198.51.100.0/24', '203.0.113.0/24', '224.0.0.0/4', '240.0.0.0/4', '255.255.255.255/32',
+		'127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16']:
+		subprocess.call('iptables -t nat -A INPUT -d ' + dip + ' -j RETURN >/dev/null 2>&1', shell=True)
+		subprocess.call('iptables -t nat -A OUTPUT -d ' + dip + ' -j RETURN >/dev/null 2>&1', shell=True)
+
+	# Allow user conf port
+	for dport in STD_OPEN_PORT:
+		subprocess.call('iptables -t nat -A INPUT -p tcp --dport ' + str(dport) + ' -j RETURN >/dev/null 2>&1', shell=True)
+
+	# Allow Loopback
+	subprocess.call('iptables -t nat -A INPUT -i lo -j RETURN >/dev/null 2>&1', shell=True)
+	subprocess.call('iptables -t nat -A OUTPUT -i lo -j RETURN >/dev/null 2>&1', shell=True)
+
+	# Allow already connected
+	subprocess.call('iptables -t nat -A INPUT -m state --state ESTABLISHED,RELATED -j RETURN >/dev/null 2>&1', shell=True)
+
+	# Tor
+	subprocess.call('iptables -t nat -A OUTPUT -m owner --uid-owner `id -u debian-tor` -j RETURN >/dev/null 2>&1', shell=True)
+	subprocess.call('iptables -t nat -A OUTPUT -p tcp --dport ' + str(TOR_SOCKS_PORT) + ' -j RETURN >/dev/null 2>&1', shell=True)
+	subprocess.call('iptables -t nat -A OUTPUT -p tcp --tcp-flags FIN,SYN,RST,ACK SYN -j REDIRECT --to-ports ' + str(TOR_TRANS_PORT) + ' >/dev/null 2>&1', shell=True)
+
+	# Drop other in
+	subprocess.call('iptables -t nat -A INPUT -j DROP >/dev/null 2>&1', shell=True)
+
+	# Drop all UDP
+	subprocess.call('iptables -t nat -A INPUT -p udp -j DROP >/dev/null 2>&1', shell=True)
+	subprocess.call('iptables -t nat -A OUTPUT -p udp -j DROP >/dev/null 2>&1', shell=True)
+
+	# Drop all IPv6
+	subprocess.call('ip6tables -A INPUT -j DROP >/dev/null 2>&1', shell=True)
+	subprocess.call('ip6tables -A OUTPUT -j DROP >/dev/null 2>&1', shell=True)
+
+	# Just in case... (Disable auto start)
+	subprocess.call('systemctl disable tor.service >/dev/null 2>&1', shell=True)
+
+
+# Stop Kill Switch
+def stop_fw():
+	subprocess.call('iptables -t nat -D OUTPUT -j PANA >/dev/null 2>&1', shell=True)
+	subprocess.call('iptables -t nat -F PANA >/dev/null 2>&1', shell=True)
+	subprocess.call('iptables -t nat -X PANA >/dev/null 2>&1', shell=True)
+
+	subprocess.call('iptables -t nat -F >/dev/null 2>&1', shell=True)
+	subprocess.call('iptables -F >/dev/null 2>&1', shell=True)
+
+
+def pana_start():
+	subprocess.call('/usr/bin/pana run >/dev/null 2>&1 &', shell=True)
+
+
+def pana_restart():
+	pana_stop()
+	pana_start()
+
+
+def pana_stop():
+	if os.path.exists('/run/pana-main'):
+		try:
+			with open('/run/pana-main', mode='r') as f:
+				mainp = f.read()
+				os.killpg(int(mainp), signal.SIGTERM)
+		except:
+			pass
+
+		os.remove('/run/pana-main')
+
+	if os.path.exists('/run/pana-tor'):
+		try:
+			with open('/run/pana-tor', mode='r') as f:
+				torp = f.read()
+				os.killpg(int(torp), signal.SIGTERM)
+		except:
+			pass
+
+		os.remove('/run/pana-tor')
+		time.sleep(1)
+
+
+def pana_run():
+	print('Pana starting... ', end='', flush=True)
+
+	try:
+		with open('/etc/tor/torrc.pana', mode='w') as f:
+			f.write(TOR_CONF)
+
+		torp = subprocess.Popen("sudo -u debian-tor /usr/bin/tor -f /etc/tor/torrc.pana >/dev/null 2>&1 &", stdout=subprocess.PIPE, preexec_fn=os.setsid, shell=True)
+	except:
+		print('ERR. Tor failed to start.')
+		exit()
+
+	time.sleep(3)
+
+	if torp.poll():
+		print('ERR. Tor failed to start.')
+		exit()
+
+	if not test_tor_socks():
+		print('ERR. Tor SOCKS port (TCP/' + str(TOR_SOCKS_PORT) + ') closed. Please check Tor config and status.')
+
+		try:
+			os.killpg(os.getpgid(torp.pid), signal.SIGTERM)
+		except:
+			pass
+
+		exit()
+
+	if not test_tor_dns():
+		print('ERR. Tor DNS port (UDP/' + str(TOR_DNS_PORT) + ') closed. Please check Tor config and status.')
+
+		try:
+			os.killpg(os.getpgid(torp.pid), signal.SIGTERM)
+		except:
+			pass
+
+		exit()
+
+	try:
+		with open('/run/pana-main', mode='w') as f:
+			f.write(str(os.getpid()))
+
+		with open('/run/pana-tor', mode='w') as f:
+			f.write(str(torp.pid))
+
+	except:
+		try:
+			os.remove('/run/pana-main')
+		except:
+			pass
+
+		try:
+			os.remove('/run/pana-tor')
+		except:
+			pass
+
+		try:
+			os.killpg(os.getpgid(torp.pid), signal.SIGTERM)
+		except:
+			pass
+
+		print('ERR. File I/O Error.')
+		exit()
+
+
+	try:
+		lock = threading.Lock()
+
+		udp_thread = threading.Thread(target=udp_server, args=(STD_LISTEN_IP, STD_DNS_PORT, lock), daemon=True)
+		udp_thread.start()
+
+		tcp_thread = threading.Thread(target=tcp_server, args=(STD_LISTEN_IP, STD_DNS_PORT, lock), daemon=True)
+		tcp_thread.start()
+
+		print('OK')
+
+		udp_thread.join(timeout=None)
+		tcp_thread.join(timeout=None)
+
+	except KeyboardInterrupt:
+		pass
+
+	except Exception:
+		print('ERR')
+
+	finally:
+		try:
+			os.remove('/run/pana-main')
+		except:
+			pass
+
+		try:
+			if os.path.exists('/run/pana-tor'):
+				try:
+					with open('/run/pana-tor', mode='r') as f:
+						torp = f.read()
+						os.killpg(os.getpgid(int(torp)), signal.SIGTERM)
+				except:
+					pass
+
+				os.remove('/run/pana-tor')
+		except:
+			pass
+
+	exit()
+
+
+def pana_install():
+	print('Installing... ', end='', flush=True)
+
+	try:
+		if not os.path.exists('/usr/bin/tor'):
+			subprocess.call('apt -y install tor', shell=True)
+
+		with open(sys.argv[0], mode='r') as f:
+			mybin = f.read()
+
+		with open('/usr/bin/pana', mode='w') as f:
+			f.write(mybin)
+
+		with open('/usr/lib/systemd/system/pana.service', mode='w') as f:
+			f.write(UNIT_FILE_MAIN)
+
+		with open('/usr/lib/systemd/system/bpana.service', mode='w') as f:
+			f.write(UNIT_FILE_BLOCK)
+
+		subprocess.call('chmod +x /usr/bin/pana >/dev/null 2>&1', shell=True)
+		subprocess.call('systemctl daemon-reload >/dev/null 2>&1', shell=True)
+		subprocess.call('systemctl enable pana.service >/dev/null 2>&1', shell=True)
+		subprocess.call('systemctl enable bpana.service >/dev/null 2>&1', shell=True)
+		subprocess.call('systemctl disable tor.service >/dev/null 2>&1', shell=True)
+
+		# Disable IPv6
+		subprocess.call("sed -i '/^net\.ipv6\.conf\.all\.disable_ipv6/d' /etc/sysctl.conf", shell=True)
+		subprocess.call("sed -i '/^net\.ipv6\.conf\.default\.disable_ipv6/d' /etc/sysctl.conf", shell=True)
+		subprocess.call("echo 'net.ipv6.conf.all.disable_ipv6 = 1' >> /etc/sysctl.conf", shell=True)
+		subprocess.call("echo 'net.ipv6.conf.default.disable_ipv6 = 1' >> /etc/sysctl.conf", shell=True)
+		subprocess.call('sysctl -p >/dev/null 2>&1', shell=True)
+	except:
+		print('ERR. Installation failed.')
+		exit()
+
+	print('Done!')
+	print('Do you want to reboot now? [Y/n] ', end='')
+
+	ans = input()
+	if ans == 'y' or ans == 'Y' or ans == '':
+		print('Rebooting...')
+		subprocess.call('shutdown -r now >/dev/null 2>&1', shell=True)
+
+
+def main():
+	if os.getuid() != 0:
+		print('run as root!')
+		exit()
+
+	if len(sys.argv) > 1 and sys.argv[1] == 'start':
+		pana_start()
+
+	elif len(sys.argv) > 1 and (sys.argv[1] == 'reload' or sys.argv[1] == 'restart'):
+		pana_restart()
+
+	elif len(sys.argv) > 1 and sys.argv[1] == 'stop':
+		pana_stop()
+
+	elif len(sys.argv) > 1 and sys.argv[1] == 'block':
+		stop_fw()
+		start_fw()
+
+	elif len(sys.argv) > 1 and sys.argv[1] == 'enable':
+		if not os.path.exists('/usr/lib/systemd/system/pana.service'):
+			exit()
+
+		if os.path.exists('/run/pana-main'):
+			print('Pana is enabled.')
+			exit()
+
+		print('Pana enabled... ', end='', flush=True)
+
+		try:
+			subprocess.call('systemctl enable bpana.service >/dev/null 2>&1', shell=True)
+			start_fw()
+
+			subprocess.call('systemctl enable pana.service >/dev/null 2>&1', shell=True)
+			subprocess.call('systemctl start pana.service >/dev/null 2>&1', shell=True)
+
+		except:
+			print('ERR!')
+			exit()
+
+		print('OK')
+
+	elif len(sys.argv) > 1 and sys.argv[1] == 'disable':
+		if not os.path.exists('/usr/lib/systemd/system/pana.service'):
+			exit()
+
+		if not os.path.exists('/run/pana-main'):
+			print('Pana is disabled.')
+			exit()
+
+		print('Disabling Pana... ', end='', flush=True)
+
+		try:
+			subprocess.call('systemctl disable bpana.service >/dev/null 2>&1', shell=True)
+			stop_fw()
+
+			subprocess.call('systemctl disable pana.service >/dev/null 2>&1', shell=True)
+			subprocess.call('systemctl stop pana.service >/dev/null 2>&1', shell=True)
+
+		except:
+			print('ERR!')
+			exit()
+
+		print('OK')
+
+	elif len(sys.argv) > 1 and sys.argv[1] == 'install':
+		pana_install()
+
+	elif len(sys.argv) > 1 and sys.argv[1] == 'run':
+		pana_run()
+
+	else:
+		if sys.argv[0] == '/usr/bin/pana':
+			print('Usage: pana [enable|disable]')
+		else:
+			print('Install/Update command: "' + sys.argv[0] + ' install"')
+
+
+if __name__ == '__main__':
+    main()
