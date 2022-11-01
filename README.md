@@ -1,5 +1,6 @@
 # pana
 Anonymization of Linux communications.  
+  
 Tor Transparent Proxy & DNS over Tor & Kill Switch  
 and Disable IPv6, Block global access.
 
