@@ -724,6 +724,9 @@ def main():
 	elif len(sys.argv) > 1 and (sys.argv[1] == 'reload' or sys.argv[1] == 'restart'):
 		pana_restart()
 
+	elif len(sys.argv) > 1 and (sys.argv[1] == 'new' or sys.argv[1] == 'renew'):
+		subprocess.call('systemctl restart pana.service >/dev/null 2>&1', shell=True)
+
 	elif len(sys.argv) > 1 and sys.argv[1] == 'stop':
 		pana_stop()
 
@@ -785,7 +788,7 @@ def main():
 
 	else:
 		if sys.argv[0] == '/usr/bin/pana':
-			print('Usage: pana [enable|disable]')
+			print('Usage: pana [enable|disable|renew]')
 		else:
 			print('Install/Update command: "' + sys.argv[0] + ' install"')
 
