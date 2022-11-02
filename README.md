@@ -34,6 +34,7 @@ IPv6が無効化されます。
 但し匿名性の観点からTorBrowser以外でWEBサイトにアクセスを行う事は大きなリスクを伴います。  
 またTorBrowserを利用する際はOS側のTor経由になるのを防ぐ為に"nopana"を利用して下さい。  
 
+----
 ## Install/Update
 ```
 curl -s https://raw.githubusercontent.com/zeppachi/pana/main/pana -o pana && sudo python3 pana install
