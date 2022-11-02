@@ -4,6 +4,8 @@ Anonymization of Linux communications.
 Tor Transparent Proxy & DNS over Tor & Kill Switch  
 and Disable IPv6, Block global access.  
   
+operating environment: Debian/Ubuntu, Python3
+  
 ----
 ### OS丸ごと全ての通信をTor経由にします
 ネットワーク構築前にKillSwitchが開始します。  
