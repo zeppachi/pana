@@ -39,7 +39,7 @@ IPv6が無効化されます。
 ----
 ## Install/Update
 ```
-curl -s https://raw.githubusercontent.com/zeppachi/pana/main/pana -o pana && sudo python3 pana install
+curl -sS https://raw.githubusercontent.com/zeppachi/pana/main/pana -o pana && sudo python3 pana install
 ```
 \* It will be automatically enabled when the installation is completed.  
 \* After installation is complete, the program is not required.  
