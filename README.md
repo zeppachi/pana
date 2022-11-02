@@ -24,3 +24,9 @@ or
 # pana [enable|disable]
 ```
 \* It also disables KillSwitch!
+
+## Disable only some app
+```bash
+$ nopana <appname>
+```
+\* sudo pwd is required (stdin support)
