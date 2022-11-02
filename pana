@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding : UTF-8 -*-
 
-# Pana 0.1.0
-# Copyright 2022 ZEPPACHI
+# Pana 0.1.1
+# https://github.com/zeppachi/pana
+# Copyright 2022 zeppachi
 # Released under the MIT license
 
 STD_LISTEN_IP = '127.0.0.1'
 STD_DNS_PORT = 8053
 STD_OPEN_PORT = [] # Recommend not to use
 
-DNS_SERVER = ['dns4torpnlfs2ifuz2s2yf3fc7rdmsbhm6rw75euj35pac6ap25zgqad.onion'] # Cloudflare(1.1.1.1)
-#DNS_SERVER = ['1.1.1.1'] # Test
+DNS_SERVER = ['dns4torpnlfs2ifuz2s2yf3fc7rdmsbhm6rw75euj35pac6ap25zgqad.onion'] # Cloudflare
+#DNS_SERVER = ['1.1.1.1', '8.8.8.8'] # Sample
 DNS_STATIC_IP = {'*.test':'127.0.0.1', 'aaa.bbb.ccc':'123.123.123.123'}
 DNS_CACHE_TIME = 60 * 3 # sec
 DNS_CACHE_NUM = 1000 # requests
 
-TOR_IP = '127.0.0.1'
 TOR_SOCKS_PORT = 9050
 TOR_TRANS_PORT = 9040
 TOR_DNS_PORT = 9053
-TOR_EXCLUDE_NODES = r'{jp},{us},{gb},{ca},{au},{nz},{dk},{fr},{nl},{no},{de},{be},{it},{es},{il},{sg},{kr},{se},{??},SlowServer'
+TOR_STRICT_NODES = 0
+TOR_EXCLUDE_NODES = r'{jp},{us},{gb},{ca},{au},{nz},{dk},{fr},{nl},{no},{de},{be},{it},{es},{il},{sg},{kr},{se},{??}'
 
 
 # ************************
@@ -31,28 +32,29 @@ TOR_CONF = """
 MaxCircuitDirtiness 300
 NewCircuitPeriod 60
 ExcludeNodes {ExcludeNodes}
-StrictNodes 0
+StrictNodes {StrictNodes}
 VirtualAddrNetworkIPv4 10.192.0.0/10
 AutomapHostsSuffixes .onion,.exit
 AutomapHostsOnResolve 1
 SocksPort 0.0.0.0:{SocksPort} IsolateDestAddr
 TransPort 0.0.0.0:{TransPort} IsolateDestAddr
 DirPort 0
-ORPort 0
+ORPort 443
 DnsPort 0.0.0.0:{DnsPort}
 UseEntryGuards 0
 NumEntryGuards 0
 ConnectionPadding 1
 ReducedCircuitPadding 1
 ReducedConnectionPadding 1
+AddressDisableIPv6 1
 ClientOnly 1
 ExitRelay 0
 ExitPolicy reject : *:*
-""".lstrip().format(ExcludeNodes=TOR_EXCLUDE_NODES, SocksPort=str(TOR_SOCKS_PORT), TransPort=str(TOR_TRANS_PORT), DnsPort=str(TOR_DNS_PORT))
+""".lstrip().format(ExcludeNodes=TOR_EXCLUDE_NODES, StrictNodes=str(TOR_STRICT_NODES), SocksPort=str(TOR_SOCKS_PORT), TransPort=str(TOR_TRANS_PORT), DnsPort=str(TOR_DNS_PORT))
 
 UNIT_FILE_BLOCK = """
 [Unit]
-Description=Tor Only Link Pre
+Description=Pana - Tor Only Link (KillSwitch)
 Before=network-pre.target
 Wants=network-pre.target
 
@@ -66,7 +68,7 @@ WantedBy=multi-user.target
 
 UNIT_FILE_MAIN = """
 [Unit]
-Description=Tor Only Link Main
+Description=Pana - Tor Only Link (Main)
 After=network-online.target
 Wants=network-online.target
 
@@ -78,6 +80,45 @@ ExecReload=/usr/bin/pana reload
 
 [Install]
 WantedBy=multi-user.target
+""".lstrip()
+
+NOPANA_BIN = """
+#!/usr/bin/env python3
+# -*- coding : UTF-8 -*-
+
+# Copyright 2022 zeppachi
+# Released under the MIT license
+
+import sys
+import subprocess
+
+def main():
+	if len(sys.argv) == 1:
+		exit()
+
+	try:
+		pw = ''
+		if not sys.stdin.isatty():
+			pw = sys.stdin.read()
+
+		cmd = sys.argv[1]
+
+		for arg in sys.argv[2:]:
+			cmd = cmd + ' "' + arg.replace('"', '\\"') + '"'
+
+		if pw == '':
+			subprocess.call('sudo -g nopana ' + cmd, shell=True)
+		else:
+			subprocess.call('echo "' + pw + '" | sudo -S -p "" -g nopana ' + cmd, shell=True)
+
+	except KeyboardInterrupt:
+		pass
+
+	except Exception:
+		pass
+
+if __name__ == '__main__':
+	main()
 """.lstrip()
 
 
@@ -123,7 +164,7 @@ def resolve_socks(query):
 
 		try:
 			sv_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-			sv_sock.connect((TOR_IP, TOR_SOCKS_PORT))
+			sv_sock.connect(('127.0.0.1', TOR_SOCKS_PORT))
 
 		except:
 			logging.info('SOCKS5 connection error')
@@ -181,7 +222,7 @@ def resolve_tor(query):
 		return b''
 
 	try:
-		sv_sock.sendto(query[2:], (TOR_IP, TOR_DNS_PORT))
+		sv_sock.sendto(query[2:], ('127.0.0.1', TOR_DNS_PORT))
 		sv_sock.settimeout(5)
 		res, addr = sv_sock.recvfrom(512)
 
@@ -274,9 +315,10 @@ def resolve(lock, query):
 		return b''
 
 	if dtype == 1 or dtype == 2 or dtype == 15:
-		for key in DNS_STATIC_IP.keys():
-			if re.match('^' + key.replace('.', '\\.').replace('*', '.*') + '$', domain):
-				return resolve_static(query, DNS_STATIC_IP[key])
+		if 'DNS_STATIC_IP' in globals() and DNS_STATIC_IP is not None:
+			for key in DNS_STATIC_IP.keys():
+				if re.match('^' + key.replace('.', '\\.').replace('*', '.*') + '$', domain):
+					return resolve_static(query, DNS_STATIC_IP[key])
 
 	if domain[-6:] == '.onion':
 		return resolve_tor(query)
@@ -424,7 +466,7 @@ def tcp_server(ip, port, lock):
 def test_tor_socks():
 	try:
 		sv_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-		sv_sock.connect((TOR_IP, TOR_SOCKS_PORT))
+		sv_sock.connect(('127.0.0.1', TOR_SOCKS_PORT))
 
 	except:
 		return False
@@ -457,7 +499,7 @@ def test_tor_dns():
 	query = query.encode()
 
 	try:
-		sv_sock.sendto(query, (TOR_IP, TOR_DNS_PORT))
+		sv_sock.sendto(query, ('127.0.0.1', TOR_DNS_PORT))
 		sv_sock.settimeout(5)
 		res, addr = sv_sock.recvfrom(512)
 
@@ -483,15 +525,17 @@ def start_fw():
 	subprocess.call('iptables -t nat -I OUTPUT -j PANA', shell=True)
 
 	# Allow local and reserved
+	# '10.0.0.0/8'
 	for dip in ['0.0.0.0/8', '100.64.0.0/10', '169.254.0.0/16', '192.0.0.0/24', '192.0.2.0/24', '192.88.99.0/24',
 		'198.18.0.0/15', '198.51.100.0/24', '203.0.113.0/24', '224.0.0.0/4', '240.0.0.0/4', '255.255.255.255/32',
-		'127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16']:
+		'127.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16']:
 		subprocess.call('iptables -t nat -A INPUT -d ' + dip + ' -j RETURN >/dev/null 2>&1', shell=True)
 		subprocess.call('iptables -t nat -A OUTPUT -d ' + dip + ' -j RETURN >/dev/null 2>&1', shell=True)
 
 	# Allow user conf port
-	for dport in STD_OPEN_PORT:
-		subprocess.call('iptables -t nat -A INPUT -p tcp --dport ' + str(dport) + ' -j RETURN >/dev/null 2>&1', shell=True)
+	if 'STD_OPEN_PORT' in globals() and STD_OPEN_PORT is not None:
+		for dport in STD_OPEN_PORT:
+			subprocess.call('iptables -t nat -A INPUT -p tcp --dport ' + str(dport) + ' -j RETURN >/dev/null 2>&1', shell=True)
 
 	# Allow Loopback
 	subprocess.call('iptables -t nat -A INPUT -i lo -j RETURN >/dev/null 2>&1', shell=True)
@@ -499,6 +543,12 @@ def start_fw():
 
 	# Allow already connected
 	subprocess.call('iptables -t nat -A INPUT -m state --state ESTABLISHED,RELATED -j RETURN >/dev/null 2>&1', shell=True)
+
+	# nopana
+	subprocess.call('iptables -t nat -A OUTPUT -m owner --gid-owner `id -g nopana` -j RETURN >/dev/null 2>&1', shell=True)
+
+	# http(80) BLOCK
+	#subprocess.call('iptables -t nat -A OUTPUT ! -d 10.0.0.0/8 -p tcp --dport 80 -j REJECT >/dev/null 2>&1', shell=True)
 
 	# Tor
 	subprocess.call('iptables -t nat -A OUTPUT -m owner --uid-owner `id -u debian-tor` -j RETURN >/dev/null 2>&1', shell=True)
@@ -682,6 +732,9 @@ def pana_install():
 		with open('/usr/bin/pana', mode='w') as f:
 			f.write(mybin)
 
+		with open('/usr/bin/nopana', mode='w') as f:
+			f.write(NOPANA_BIN)
+
 		with open('/usr/lib/systemd/system/pana.service', mode='w') as f:
 			f.write(UNIT_FILE_MAIN)
 
@@ -689,6 +742,10 @@ def pana_install():
 			f.write(UNIT_FILE_BLOCK)
 
 		subprocess.call('chmod +x /usr/bin/pana >/dev/null 2>&1', shell=True)
+		subprocess.call('chmod +x /usr/bin/nopana >/dev/null 2>&1', shell=True)
+
+		subprocess.call('sudo useradd --system -M -s /sbin/nologin nopana >/dev/null 2>&1', shell=True)
+
 		subprocess.call('systemctl daemon-reload >/dev/null 2>&1', shell=True)
 		subprocess.call('systemctl enable pana.service >/dev/null 2>&1', shell=True)
 		subprocess.call('systemctl enable bpana.service >/dev/null 2>&1', shell=True)
@@ -788,10 +845,10 @@ def main():
 
 	else:
 		if sys.argv[0] == '/usr/bin/pana':
-			print('Usage: pana [enable|disable|renew]')
+			print('Usage: pana [renew|enable|disable]')
 		else:
 			print('Install/Update command: "' + sys.argv[0] + ' install"')
 
 
 if __name__ == '__main__':
-    main()
+	main()
