@@ -1,12 +1,16 @@
 # pana
 Anonymization of Linux communications.  
   
-Tor Transparent Proxy & DNS over Tor & Kill Switch  
+Tor Transparent Proxy & DNS over HTTPS over Tor & Kill Switch  
 and Disable IPv6, Block global access.  
   
 operating environment: Debian/Ubuntu, Python3
   
 ----
+### インストールも利用も簡単
+ワンライナーでインストール完了、再起動後は常時有効で何も意識する必要はありません。  
+万が一プログラムが落ちてもキルスイッチが通信をブロックします。
+
 ### OS丸ごと全ての通信をTor経由にします
 ネットワーク構築前にKillSwitchが開始します。  
 なおTor経由なのでUDPでの通信はローカルネットワーク内に制限されます。  
@@ -14,9 +18,10 @@ operating environment: Debian/Ubuntu, Python3
 ### 接続先毎に異なるIPを使用します  
 但しTorサーキットの都合で同じIPになる事もあります。  
 
-### 可能な範囲でDNS over Torを使用します
-暗号化されていないDNS（53）は全てDNS over TorになりクリアWEBへ出ずに名前解決行います。  
-また同時に.onionの正引きが可能になります。  
+### DNS over HTTPS over Torを使用します
+全てのDNSリクエストは、DNS over HTTPS over Torになります。  
+更にDNS over HTTPSを独自実装していない多くのクライアントは、Cloudflareの.onionサーバーを利用する事になります。  
+また同時にDNS over HTTPSを独自実装していない全てのクライアントは.onionの正引きが可能になります。  
 
 ### グローバルからの外部アクセスを遮断します  
 オプションでポートを開く事も可能ですが、非推奨です。
