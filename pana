@@ -29,7 +29,6 @@ TOR_EXCLUDE_NODES = r'{jp},{us},{gb},{ca},{au},{nz},{dk},{fr},{nl},{no},{de},{be
 import sys
 import os
 import time
-import base64
 import subprocess
 import threading
 import socket
