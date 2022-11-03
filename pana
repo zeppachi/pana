@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding : UTF-8 -*-
 
-# Pana 0.1.1
+# Pana 0.1.2
 # https://github.com/zeppachi/pana
 # Copyright 2022 zeppachi
 # Released under the MIT license
 
-STD_LISTEN_IP = '127.0.0.1'
 STD_DNS_PORT = 8053
-STD_OPEN_PORT = [] # Recommend not to use
+#STD_OPEN_PORT = [] # Recommend not to use
 
-DNS_SERVER = ['dns4torpnlfs2ifuz2s2yf3fc7rdmsbhm6rw75euj35pac6ap25zgqad.onion'] # Cloudflare
+DNS_SERVER = ['dns4torpnlfs2ifuz2s2yf3fc7rdmsbhm6rw75euj35pac6ap25zgqad.onion:443'] # Cloudflare
 #DNS_SERVER = ['1.1.1.1', '8.8.8.8'] # Sample
-DNS_STATIC_IP = {'*.test':'127.0.0.1', 'aaa.bbb.ccc':'123.123.123.123'}
+#DNS_STATIC_IP = {'*.test':'127.0.0.1', 'aaa.bbb.ccc':'123.123.123.123'} # Sample
 DNS_CACHE_TIME = 60 * 3 # sec
 DNS_CACHE_NUM = 1000 # requests
 
@@ -26,6 +25,20 @@ TOR_EXCLUDE_NODES = r'{jp},{us},{gb},{ca},{au},{nz},{dk},{fr},{nl},{no},{de},{be
 # ************************
 # Do not edit below this!
 # ************************
+
+import sys
+import os
+import time
+import base64
+import subprocess
+import threading
+import socket
+import socks
+import ssl
+import re
+import logging
+
+#logging.disable(logging.CRITICAL)
 
 TOR_CONF = """
 # Create by Pana
@@ -121,30 +134,73 @@ if __name__ == '__main__':
 	main()
 """.lstrip()
 
-
-import sys
-import os
-import time
-import subprocess
-import threading
-import socket
-import re
-import logging
-
-#logging.disable(logging.CRITICAL)
 dns_cache = {}
 
 
 def resolve_socks(query):
 	for dns in DNS_SERVER:
 		dns = dns.split(':', 2)
-		if len(dns) == 1:
-			port = (53).to_bytes(2, byteorder='big')
-			dns = dns[0]
-		else:
-			port = int(dns[1]).to_bytes(2, byteorder='big')
-			dns = dns[0]
 
+		if len(dns) == 1:
+			port = 53
+		else:
+			port = int(dns[1])
+
+		dns = dns[0]
+
+		socks.set_default_proxy(socks.SOCKS5, '127.0.0.1', TOR_SOCKS_PORT)
+
+		if port == 443:
+			# SSL
+			sslcon = ssl.create_default_context()
+			ssl_sock = socks.socksocket(socket.AF_INET, socket.SOCK_STREAM)
+			ssl_sock.connect((dns, port))
+			sv_sock = sslcon.wrap_socket(ssl_sock, server_hostname=dns)
+
+			b_query = query[2:]
+
+			http_head = b'POST /dns-query HTTP/1.1\r\n'
+			http_head += b'Host: ' + dns.encode() + b'\r\n'
+			http_head += b'Accept: application/dns-message\r\n'
+			http_head += b'Content-Type: application/dns-message\r\n'
+			http_head += b'Content-Length: ' + str(len(b_query)).encode() + b'\r\n'
+			http_head += b'Connection: close\r\n'
+
+			b_query = http_head + b'\r\n' + b_query
+
+		else:
+			# STD
+			sv_sock = socks.socksocket(socket.AF_INET, socket.SOCK_STREAM)
+			sv_sock.connect((dns, port))
+
+			b_query = query
+
+		try:
+			sv_sock.sendall(b_query)
+			sv_sock.settimeout(15)
+			res = sv_sock.recv(4096)
+			sv_sock.close()
+
+			if port == 443:
+				res = res.split(b'\r\n\r\n', 2)
+				if len(res) != 2 or res[0].find(b'HTTP/1.1 200 ') == -1:
+					continue
+
+				res = len(res[1]).to_bytes(2, byteorder='big') + res[1]
+
+		except:
+			try:
+				sv_sock.close()
+			except:
+				pass
+
+			continue
+
+		return res
+
+	return b''
+
+"""
 		if re.match("^[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}$", dns):
 			# IP
 			ip = dns.split('.')
@@ -153,14 +209,24 @@ def resolve_socks(query):
 			req += int(ip[1]).to_bytes(1, byteorder='big')
 			req += int(ip[2]).to_bytes(1, byteorder='big')
 			req += int(ip[3]).to_bytes(1, byteorder='big')
-			req += port
+			req += port.to_bytes(2, byteorder='big')
 
 		else:
 			# DOMAIN
 			req = b"\x05\x01\x00\x03"
 			req += len(dns).to_bytes(1, byteorder='big')
 			req += dns.encode()
-			req += port
+			req += port.to_bytes(2, byteorder='big')
+
+		if port == 443:
+			http_head = b'POST / HTTP/1.1\r\n'
+			http_head += b'Host: ' + dns.encode() + b'\r\n'
+			http_head += b'Path: /dns-query\r\n'
+			http_head += b'Content-Type: application/dns-message\r\n'
+			http_head += b'Content-Length: close\r\n'
+			http_head += b'Accept: application/dns-message\r\n'
+			http_head += b'Connection: close\r\n'
+			http_head += b'\r\n'
 
 		try:
 			sv_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -211,6 +277,7 @@ def resolve_socks(query):
 		return res
 
 	return b''
+"""
 
 
 def resolve_tor(query):
@@ -612,6 +679,54 @@ def pana_stop():
 		time.sleep(1)
 
 
+def pana_enable():
+	if not os.path.exists('/usr/lib/systemd/system/pana.service'):
+		exit()
+
+	if os.path.exists('/run/pana-main'):
+		print('Pana is enabled.')
+		exit()
+
+	print('Pana enabled... ', end='', flush=True)
+
+	try:
+		subprocess.call('systemctl enable bpana.service >/dev/null 2>&1', shell=True)
+		start_fw()
+
+		subprocess.call('systemctl enable pana.service >/dev/null 2>&1', shell=True)
+		subprocess.call('systemctl start pana.service >/dev/null 2>&1', shell=True)
+
+	except:
+		print('ERR!')
+		exit()
+
+	print('OK')
+
+
+def pana_disable():
+	if not os.path.exists('/usr/lib/systemd/system/pana.service'):
+		exit()
+
+	if not os.path.exists('/run/pana-main'):
+		print('Pana is disabled.')
+		exit()
+
+	print('Disabling Pana... ', end='', flush=True)
+
+	try:
+		subprocess.call('systemctl disable bpana.service >/dev/null 2>&1', shell=True)
+		stop_fw()
+
+		subprocess.call('systemctl disable pana.service >/dev/null 2>&1', shell=True)
+		subprocess.call('systemctl stop pana.service >/dev/null 2>&1', shell=True)
+
+	except:
+		print('ERR!')
+		exit()
+
+	print('OK')
+
+
 def pana_run():
 	print('Pana starting... ', end='', flush=True)
 
@@ -680,10 +795,10 @@ def pana_run():
 	try:
 		lock = threading.Lock()
 
-		udp_thread = threading.Thread(target=udp_server, args=(STD_LISTEN_IP, STD_DNS_PORT, lock), daemon=True)
+		udp_thread = threading.Thread(target=udp_server, args=('127.0.0.1', STD_DNS_PORT, lock), daemon=True)
 		udp_thread.start()
 
-		tcp_thread = threading.Thread(target=tcp_server, args=(STD_LISTEN_IP, STD_DNS_PORT, lock), daemon=True)
+		tcp_thread = threading.Thread(target=tcp_server, args=('127.0.0.1', STD_DNS_PORT, lock), daemon=True)
 		tcp_thread.start()
 
 		print('OK')
@@ -775,73 +890,36 @@ def main():
 		print('run as root!')
 		exit()
 
-	if len(sys.argv) > 1 and sys.argv[1] == 'start':
-		pana_start()
+	if len(sys.argv) > 1:
+		cmd = sys.argv[1]
 
-	elif len(sys.argv) > 1 and (sys.argv[1] == 'reload' or sys.argv[1] == 'restart'):
-		pana_restart()
+		if cmd == 'start':
+			pana_start()
 
-	elif len(sys.argv) > 1 and (sys.argv[1] == 'new' or sys.argv[1] == 'renew'):
-		subprocess.call('systemctl restart pana.service >/dev/null 2>&1', shell=True)
+		elif cmd == 'reload' or cmd == 'restart':
+			pana_restart()
 
-	elif len(sys.argv) > 1 and sys.argv[1] == 'stop':
-		pana_stop()
+		elif cmd == 'new' or cmd == 'renew':
+			subprocess.call('systemctl restart pana.service >/dev/null 2>&1', shell=True)
 
-	elif len(sys.argv) > 1 and sys.argv[1] == 'block':
-		stop_fw()
-		start_fw()
+		elif cmd == 'stop':
+			pana_stop()
 
-	elif len(sys.argv) > 1 and sys.argv[1] == 'enable':
-		if not os.path.exists('/usr/lib/systemd/system/pana.service'):
-			exit()
-
-		if os.path.exists('/run/pana-main'):
-			print('Pana is enabled.')
-			exit()
-
-		print('Pana enabled... ', end='', flush=True)
-
-		try:
-			subprocess.call('systemctl enable bpana.service >/dev/null 2>&1', shell=True)
+		elif cmd == 'block':
+			stop_fw()
 			start_fw()
 
-			subprocess.call('systemctl enable pana.service >/dev/null 2>&1', shell=True)
-			subprocess.call('systemctl start pana.service >/dev/null 2>&1', shell=True)
+		elif cmd == 'enable':
+			pana_enable()
 
-		except:
-			print('ERR!')
-			exit()
+		elif cmd == 'disable':
+			pana_disable()
 
-		print('OK')
+		elif cmd == 'install':
+			pana_install()
 
-	elif len(sys.argv) > 1 and sys.argv[1] == 'disable':
-		if not os.path.exists('/usr/lib/systemd/system/pana.service'):
-			exit()
-
-		if not os.path.exists('/run/pana-main'):
-			print('Pana is disabled.')
-			exit()
-
-		print('Disabling Pana... ', end='', flush=True)
-
-		try:
-			subprocess.call('systemctl disable bpana.service >/dev/null 2>&1', shell=True)
-			stop_fw()
-
-			subprocess.call('systemctl disable pana.service >/dev/null 2>&1', shell=True)
-			subprocess.call('systemctl stop pana.service >/dev/null 2>&1', shell=True)
-
-		except:
-			print('ERR!')
-			exit()
-
-		print('OK')
-
-	elif len(sys.argv) > 1 and sys.argv[1] == 'install':
-		pana_install()
-
-	elif len(sys.argv) > 1 and sys.argv[1] == 'run':
-		pana_run()
+		elif cmd == 'run':
+			pana_run()
 
 	else:
 		if sys.argv[0] == '/usr/bin/pana':
