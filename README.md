@@ -7,10 +7,6 @@ and Disable IPv6, Block global access.
 operating environment: Debian/Ubuntu, Python3
   
 ----
-### インストールも利用も簡単
-ワンライナーでインストール完了、再起動後は常時有効で何も意識する必要はありません。  
-万が一プログラムが落ちてもキルスイッチが通信をブロックします。
-
 ### OS丸ごと全ての通信をTor経由にします
 ネットワーク構築前にKillSwitchが開始します。  
 なおTor経由なのでUDPでの通信はローカルネットワーク内に制限されます。  
